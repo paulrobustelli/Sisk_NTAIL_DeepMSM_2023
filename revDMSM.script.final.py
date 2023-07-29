@@ -25,6 +25,9 @@ from IPython.display import display
 import scipy.stats as stats
 import matplotlib.colors as colors
 from itertools import repeat
+import argparse
+import importlib
+import re
 
 # from torch.Nested import nested_tensor ###dreaming of pytorch to drop nested tensor support
 
@@ -209,12 +212,53 @@ def moving_average(x: np.ndarray, n: int = 3):
 # In[368]:
 
 
-def plain_state_dict(d, badword="module"):
+def multireplace(string, replacements, ignore_case=False):
+    """
+    Given a string and a replacement map, it returns the replaced string.
+    :param str string: string to execute replacements on
+    :param dict replacements: replacement dictionary {value to find: value to replace}
+    :param bool ignore_case: whether the match should be case insensitive
+    :rtype: str
+    """
+    if not replacements:
+        # Edge case that'd produce a funny regex and cause a KeyError
+        return string
+    if ignore_case:
+        def normalize_old(s):
+            return s.lower()
+        re_mode = re.IGNORECASE
+    else:
+        def normalize_old(s):
+            return s
+
+        re_mode = 0
+    replacements = {normalize_old(key): val for key, val in replacements.items()}
+    rep_sorted = sorted(replacements, key=len, reverse=True)
+    rep_escaped = map(re.escape, rep_sorted)
+    pattern = re.compile("|".join(rep_escaped), re_mode)
+    return pattern.sub(lambda match: replacements[normalize_old(match.group(0))], string)
+
+
+def plain_state_dict(d, badwords=["module.","model."]):
+    replacements= dict(zip(badwords,[""]*len(badwords)))
     new = OrderedDict()
     for k, v in d.items():
-        name = k.replace(badword + ".", "")
+        name = multireplace(string=k, replacements=replacements, ignore_case=True)
         new[name] = v
     return new
+
+def load_state_dict(model, file):
+    try:
+        model.load_state_dict(plain_state_dict(torch.load(file)))
+
+    #if we're trying to load from lightning state dict
+
+    except:
+
+        model.load_state_dict(plain_state_dict(torch.load(file)["state_dict"]))
+
+    return model
+
 
 
 def proj2d(p, c, alpha: "float or array of floats" = None,
@@ -255,32 +299,34 @@ def proj2d(p, c, alpha: "float or array of floats" = None,
         plt.clf()
     return
 
-
 def plot_free_energy(hist2d: np.ndarray, T: float,
                      title: str, xlabel: str, ylabel: str,
-                     x_centers: np.ndarray, y_centers: np.ndarray):
-    plt.figure(figsize=(10, 10))
+                     x_centers: np.ndarray,
+                     y_centers: np.ndarray,
+                     ax=None,
+                     cbar=True):
+    if ax is None:
+        fig, ax = plt.subplots(1, figsize=(10, 10))
     free_energy = -T * 0.001987 * np.log(hist2d + .000001)
-    im = plt.imshow(free_energy, interpolation='gaussian',
-                    extent=[x_centers[0], x_centers[-1],
-                            y_centers[0], y_centers[-1]],
-                    cmap='jet', aspect='auto')
-    imaxes = plt.gca()
-    plt.ylabel(ylabel, size=44, labelpad=15)
-    plt.xlabel(xlabel, size=44, labelpad=15)
-    plt.title(title, size=35)
+    im = ax.imshow(free_energy, interpolation='gaussian',
+                   extent=[x_centers[0], x_centers[-1],
+                           y_centers[0], y_centers[-1]],
+                   cmap='jet', aspect='auto',
+                   vmin=.1, vmax=3)
+    ax.set_ylabel(ylabel, size=44, labelpad=15)
+    ax.set_xlabel(xlabel, size=44, labelpad=15)
+    ax.set_title(title, size=35)
     # HARD CODED TO Q IN THE X-AXIS
-    plt.xticks(ticks=[.2, .4, .6, .8, 1], labels="0.2,0.4,0.6,0.8,1".split(","), fontsize=40)
-    plt.yticks(fontsize=40)
-    cbar_ticks = [0, 1, 2, 3]
-    cb = plt.colorbar(ticks=cbar_ticks, format=('% .1f'), aspect=10)
-    cb.set_label("Free Energy / (kT)", size=45)
-    cb.ax.tick_params(labelsize=40)
-    plt.axes(cb.ax)
-    plt.clim(vmin=.1, vmax=3.0)
-    plt.xlim(0, 1)
-    plt.tight_layout()
-
+    ax.set_xticks(ticks=[.2, .4, .6, .8, 1], labels="0.2,0.4,0.6,0.8,1".split(","), fontsize=40)
+    ax.tick_params(labelsize="40")
+    if cbar:
+        cbar_ticks = [0, 1, 2, 3]
+        cb = plt.colorbar(mappable=im, ax=ax, ticks=cbar_ticks, format=('% .1f'), aspect=10)
+        cb.set_label("Free Energy / (kT)", size=45)
+        cb.ax.tick_params(labelsize=40)
+    # ax.set_xlim(0,1)
+    # plt.axes(cb.ax)
+    return im
 
 def reindex_dtraj(dtraj, obs, maximize_obs=True):
     """given a discrete trajectory and an observable, we reindex the trajectory 
@@ -926,8 +972,7 @@ class ConstrainedVAMPnet(MultiforwardTorchModule):
         self.vls = vamp_S
         self.chi = chi
         if not chi_state_dict is None:
-            self.chi.load_state_dict(plain_state_dict(
-                torch.load(chi_state_dict)))
+            self.chi = load_state_dict(self.chi, chi_state_dict)
         if n_devices is None:
             n_devices = torch.cuda.device_count()
         self.device_ids = [*range(n_devices)]
@@ -1087,6 +1132,8 @@ class KoopmanModel():
         # self.epsilons = None
         if n_devices is None:
             self.n_devices = min(8, torch.cuda.device_count())
+        else:
+            self.n_devices = n_devices
             ###instantiate models###
         self.reset_model()
 
@@ -1301,7 +1348,7 @@ class KoopmanModel():
             chi_state_dict = self.chi_state_dict
 
         ###assuming that the chi class is defined in the script###
-        self.model.chi = chi.load_state_dict(plain_state_dict(torch.load(chi_state_dict)))
+        self.model.chi = load_state_dict(chi, chi_state_dict)
         self.optims["all"] = Adam(self.model.parameters(), lr=self.lrs["all"])
         self.model = self.model.cuda()
         return None
@@ -1359,7 +1406,7 @@ class KoopmanModel():
                                             vamp_u=vamp_u(self.output_dim),
                                             vamp_S=vamp_S(self.output_dim),
                                             n_devices=self.n_devices)
-            self.model.load_state_dict(torch.load(self.model_state_dict))
+            self.model = load_state_dict(self.model, self.model_state_dict)
             self.model = self.model.cuda()
 
         self.optims = {"uS": Adam([*self.model.parameters()][:2], lr=self.lrs["uS"]),
@@ -1997,8 +2044,8 @@ if __name__ == "__main__":
                         help="epsilon parameter for VAMPnet loss function \
                         (minimum magnitude of eigen values to keep in inversions)")
 
-    parser.add_argument("--out_dir", required=False, type=str, default=False,
-                        help="Directory to save trial and ")
+    parser.add_argument("--out_dir", required=False, type=str, default=None,
+                        help="Directory to save trial ")
 
     parser.add_argument("--batch_size", "-batch", required=True, type=int,
                         help="training batch size")
@@ -2015,7 +2062,7 @@ if __name__ == "__main__":
     parser.add_argument("--output_dim", required=True, type=int,
                         help="The number of output states for the VAMPnet")
 
-    parser.add_argument("--indices", requried=False, type=str, default=None,
+    parser.add_argument("--indices", required=False, type=str, default=None,
                         help="file to an np.ndarray of shuffled indices that is equal to the length of the dataset")
 
     parser.add_argument("--net_script", required=True, type=str,
@@ -2029,6 +2076,8 @@ if __name__ == "__main__":
 
     parser.add_argument("--num_workers", required=False, type=str, default=0,
                         help="Number of workers to use in pytorch dataloaders")
+    parser.add_argument("--n_devices", required = False, type = int, default = None,
+                        help = "The number of devices to use to train the neural network")
 
     args = parser.parse_args()
 
@@ -2044,11 +2093,12 @@ if __name__ == "__main__":
                         epsilon=args.epsilon,
                         batch_size=args.batch_size,
                         epochs=args.n_epochs,
-                        lrs=[args.constraint_lr, args.network_lr],  # one for contraints one for the entire network
+                        lrs=[args.constraint_lr, args.network_lr],  # one for constraints one for the entire network
                         indices=args.indices,
                         out_dir=args.out_dir,
                         pin_memory=args.pin_memory,
-                        num_workers=args.num_workers)
+                        num_workers=args.num_workers,
+                        n_devices=args.n_devices)
     #                     model_state_dict = model_state_dict,
     #                     uS_optim_state_dict = uS_optim_state_dict, 
     #                     all_optim_state_dict = all_optim_state_dict,
