@@ -1629,10 +1629,10 @@ class KoopmanModel():
                           disable=disable_bar):
             # assuming u and S have just been trained, train all first
 
-            self.train_uS(epochs=500, increment_log=False, leave_bar=True,
+            self.train_uS(epochs=5000, increment_log=False, leave_bar=True,
                           disable_bar=disable_nested_bar)
 
-            self.train_all(epochs=500, increment_log=False, leave_bar=True,
+            self.train_all(epochs=50000, increment_log=False, leave_bar=True,
                            disable_bar=disable_nested_bar)
 
             # easiest to set a large number of epochs and let early stopping kill the run
@@ -2081,7 +2081,12 @@ if __name__ == "__main__":
 
     args = parser.parse_args()
 
-    sys.path.insert(0, "/".join(args.net_script.split("/")[:-1]))
+    if len(args.net_script.split("/")) == 1 or args.net_script.split("/")[-2] == ".":
+        module_dir = os.getcwd()
+    else:
+        module_dir = "/".join(args.net_script.split("/")[:-1])
+
+    sys.path.insert(0, module_dir)
     module = importlib.import_module(args.net_script.split("/")[-1].replace(".py", ""))
     g = globals()
     g["chi"] = getattr(module, args.net_name)
