@@ -209,8 +209,158 @@ def moving_average(x: np.ndarray, n: int = 3):
     return ret[n - 1:] / n
 
 
+def ci(x, iv=.999, mean=True, return_one=None, single_value=False):
+    if mean:
+        loc = x.mean()
+    else:
+        loc = 0
+    l, u = stats.t.interval(alpha=iv, df=len(x) - 1, loc=loc, scale=stats.sem(x))
+
+    if single_value:
+        return np.array([abs(i) for i in [l, u]]).mean()
+
+    if return_one is None:
+        return l, u
+    else:
+        if return_one == "l":
+            return l
+        if return_one == "u":
+            return u
+
+
+# helper functions for retrieving saved optimization runs
+def max_str(files):
+    if isinstance(files, list):
+        files = np.array(files)
+    return files[np.argmax(np.array([num_str(f, return_str=False, return_num=True) for f in files]))]
+
+
+def sort_strs(files, max=False):
+    if isinstance(files, list):
+        files = np.array(files)
+    if max:
+        return files[np.argsort(np.array([num_str(f, return_str=False, return_num=True) for f in files]))]
+    else:
+        return files[np.argsort(np.array([num_str(f, return_str=False, return_num=True) for f in files]))]
+
+
+def get_ckpt(dir, keyword="ckpt"):
+    return dir + "/" + max_str(keyword_files(dir, keyword))
+
+
+def lsdir(dir, keyword=None):
+    """full path version of os.listdir with files/directories in order"""
+    if not keyword is None:
+        listed_dir = keyword_files(dir, keyword)
+    else:
+        listed_dir = os.listdir(dir)
+    return [dir + "/" + i for i in sort_strs(listed_dir)]
+
+
+def keyword_files(dir, keyword):
+    files = os.listdir(dir)
+    return [dir + "/" + f for f in files if keyword in f]
+
+
+# function to perform bootstrapping on data from all optimization runs
+##notice that these functions are designed to work with data saved by the KoopmanModel class and looks for specifically named files!!!!
+
+def bagged_stat(ckpt_dirs: list, file: str, name: str = None,
+                compute_sd=False, compute_ci=False,
+                distribution=False, hist2d=False,
+                make_df=False, display_df=False):
+    outs = {}
+    n_samples = len(ckpt_dirs)
+    trial_means = np.stack([np.load(i + f"/{file}_ensemble_ave.npy") for i in ckpt_dirs])
+    outs["mean"] = trial_means.mean(0)
+
+    if compute_ci:
+        ci95 = np.apply_along_axis(func1d=ci, axis=0, arr=trial_means,
+                                   mean=False, single_value=True)
+        outs["ci95"] = ci95
+
+    if compute_sd:
+        trial_sds = np.stack([np.load(i + f"/{file}_ensemble_sd.npy") for i in ckpt_dirs])
+        # gives almost the same as the alternative definition below
+        outs["sd"] = np.sqrt((np.power(trial_sds, 2) + np.power(trial_means - outs["mean"], 2)).sum(0) / n_samples)
+
+    if distribution:
+        """Let's try having this accept a dictionary in order to keep track of bin edges"""
+        outs["dist"] = {}
+        dicts = [load_dict(i + f"/{file}_ensemble_dist.pkl") for i in ckpt_dirs]
+        trial_dists = np.stack([i["probs"] for i in dicts])
+        outs["dist"]["mean"] = trial_dists.mean(0)
+        outs["dist"]["ci95"] = np.apply_along_axis(func1d=ci, axis=0, arr=trial_dists, mean=True)
+        outs["dist"]["bin_centers"] = dicts[0]["bin_centers"]
+
+    if compute_sd and compute_ci and make_df and not distribution:
+        assert not name is None, "Must give a name to the state to make a dataframe"
+        df = pd.DataFrame(data=np.stack(list(outs.values()), axis=1),
+                          columns=r"$<{}>$,95% CI of mean,${}_{{\sigma}}$".format(name, name).split(","),
+                          index=np.arange(1, len(outs["mean"]) + 1))
+        if display_df:
+            display(df)
+        return df
+
+    else:
+        return outs
+
+
+def bagged_hist2d(ckpt_dirs: list, file: str, name: str = None):
+    dist = {}
+    dicts = [load_dict(i + f"/{file}_ensemble_dist2d.pkl") for i in ckpt_dirs]
+    dist["x_centers"] = dicts[0]["x_centers"]
+    dist["y_centers"] = dicts[0]["y_centers"]
+    trial_dists = np.stack([i["probs"] for i in dicts])
+    dist["mean"] = trial_dists.mean(0)
+    return dist
+
+
 # In[368]:
 
+def source_module(module_file: str, local_module_name: str = None):
+
+    """to add a module from a user defined python script into the local name space"""
+
+    #
+    if local_module_name is None:
+        local_module_name = module_file.split("/")[-1].replace(".py", "")
+
+    if len(module_file.split("/")) == 1 or module_file.split("/")[-2] == ".":
+        module_dir = os.getcwd()
+    else:
+        module_dir = "/".join(module_file.split("/")[:-1])
+
+    sys.path.insert(0, module_dir)
+
+    module = importlib.import_module(module_file.split("/")[-1].replace(".py", ""))
+
+    g = globals()
+    g[local_module_name] = module
+
+    pass
+
+
+def source_module_attr(module_file: str, attr_name: str, local_attr_name: str = None):
+    """to add a module from a user defined python script into the local name space"""
+
+    #
+    if local_attr_name is None:
+        local_attr_name = attr_name
+
+    if len(module_file.split("/")) == 1 or module_file.split("/")[-2] == ".":
+        module_dir = os.getcwd()
+    else:
+        module_dir = "/".join(module_file.split("/")[:-1])
+
+    sys.path.insert(0, module_dir)
+
+    module = importlib.import_module(module_file.split("/")[-1].replace(".py", ""))
+
+    g = globals()
+    g[local_attr_name] = getattr(module, attr_name)
+
+    pass
 
 def multireplace(string, replacements, ignore_case=False):
     """
@@ -328,6 +478,87 @@ def plot_free_energy(hist2d: np.ndarray, T: float,
     # plt.axes(cb.ax)
     return im
 
+def contact_maps_helix(flat_map: "average contact population", dssp: "average dsspH for state", dssp_error,
+                           native_index: "indices of native distances", index: list, columns: list,
+                           index_res_color: list, ci: int, cut: int,
+                           xlabel: str, ylabel: str, title: str):
+
+        flat_map = np.copy(flat_map)
+        flat_map[native_index] *= -1
+        flat_map = flat_map.reshape(len(index), len(columns))
+        fig = plt.figure(figsize=(12, 16), constrained_layout=True)
+        grid = GridSpec(6, 3, hspace=.2, wspace=0.2)
+        ax = fig.add_subplot(grid[:-1, :])
+        im = ax.imshow(100 * np.flip(flat_map[cut:], axis=0), cmap='seismic', aspect='auto', vmin=-100, vmax=100)
+        # ax.grid(which="both",alpha=0.5)
+        ax.grid(which="both", alpha=1, lw=2)
+        ax.set_yticks(range(len(index[cut:]))[::2], np.flip(index[cut:])[::2], size=35)
+        ax.set_xticks(np.arange(21), ["" for i in range(21)], size=0)
+        ax.set_title(title + f" State {ci}", size=42)
+        ax.set_ylabel(ylabel, size=40)
+        cb = ax.inset_axes([1.05, 0, .08, 1], transform=ax.transAxes)
+        cbar = fig.colorbar(im, cax=cb, orientation="vertical")
+        cbar.ax.tick_params(labelsize=34)
+
+        cb_label = "          Contact Population (%)          \n\nNon-Native                              Native"
+
+        cbar.set_label(cb_label, size=36, rotation=270, labelpad=120, fontweight="bold")
+
+        cbar.set_ticklabels(abs(np.arange(-100, 101, 25)))
+        dp = fig.add_subplot(grid[-1, :], sharex=ax)
+        fig.execute_constrained_layout()
+        dp.fill_between(np.arange(21), dssp, color="darkgoldenrod", alpha=.4)
+        dp.set_xticks(np.arange(21), columns, rotation=-90, ha="center", size=35)
+        dp.plot(dssp, color="black", ls="--", marker=".", ms=10)
+        dp.errorbar(np.arange(21), dssp, yerr=dssp_error, alpha=1, color="black", capsize=5)
+        dp.set_xlabel(xlabel, size=40)
+        dp.set_ylim(0, 1)
+        dp.set_yticks([0, .5, 1], [0, .5, 1], size=30)
+        dp.grid(which="major", alpha=1, lw=2)
+        dp.set_ylabel("P(H)", size=38)
+        for i in ax.get_yticklabels():
+            if index_res_color[i.get_text()] != "black": i.set_alpha(.7)
+            i.set_color(index_res_color[i.get_text()])
+
+def get_contact_data(pair: str,
+                     state: int,
+                     pairs: "np.ndarray or string residue pairs" = "d['pairs']",
+                     mean_contact_data: np.ndarray = "ave_contacts['mean']",
+                     ci_contact_data: np.ndarray = "ave_contacts['ci95']",
+                     mean_dist_data: np.ndarray = "ave_distances['mean']",
+                     ci_dist_data: np.ndarray = "ave_distances['ci95']"
+                     ):
+    """contact data arrays are (Ncontacts,Nstates)
+    returns a list with [mean,CI] for a given distance and state
+    """
+    idx = np.where(pairs == pair)[0][0]
+    ##make contacts a percentage
+    mean_contact = 100 * mean_contact_data[idx, state]
+    ci_contact = 100 * ci_contact_data[idx, state]
+    ##
+    mean_dist = mean_dist_data[idx, state]
+    ci_dist = ci_dist_data[idx, state]
+    return [mean_contact, ci_contact, mean_dist, ci_dist]
+
+def combine_contact_stats(pairs: list, state: int, return_df=False,
+                         prot_name_1: str = "XD", prot_name_2: str = "NT"):
+
+    data = np.array([get_contact_data(pair=i, state=state) for i in pairs])
+    pairs_display = [f"{prot_name_1}:{i.split(',')[0]}-{prot_name_2}:{i.split(',')[-1]}" for i in pairs]
+    combined_stats = np.array(
+        [[data[..., i].mean(), pooled_sd(means=data[..., i], sds=data[..., i + 1])] for i in [0, 2]]).reshape(
+        -1, 1)
+    data = np.concatenate([data.T, combined_stats], axis=1)
+    df = pd.DataFrame(data=data, columns=pairs_display + ["Cumulative Average (propogated error)"],
+                      index="Contact Probability (%),95% CI contact,Ave Distance,95% CI Distance".split(","))
+    df = df.style.set_caption(f"State {state}")
+    display(df)
+    if return_df:
+        return df
+    else:
+        pass
+
+
 def reindex_dtraj(dtraj, obs, maximize_obs=True):
     """given a discrete trajectory and an observable, we reindex the trajectory 
     based on the mean of the observable in each state (high to low)
@@ -413,11 +644,11 @@ def get_its(mats, tau: int):
 
 
 def plot_its(estimate: np.ndarray, estimate_error=None, lag: int = 1, dt: float = .2, unit="ns",
-             cmap=plt.cm.jet, fig_width=10, fig_length=6, title: str = "Implied Timescales"):
+             cmap:str="jet", fig_width=10, fig_length=6, title: str = "Implied Timescales"):
     """estimate: eigen vals estimated at integrer multiples of the lag time
     predict: eigen vals of the initial lagtime propogated via eponentiation"""
     nprocs, nsteps = estimate.shape
-
+    cmap = getattr(plt.cm, cmap)
     cs = [cmap(i) for i in range(cmap.N)]
     color_list = [cs[int(i)] for i in np.linspace(10, len(cs) - 20, nprocs)]
     color_list = color_list[::-1]
@@ -427,7 +658,7 @@ def plot_its(estimate: np.ndarray, estimate_error=None, lag: int = 1, dt: float 
     for est_proc, color in zip([estimate[i] for i in range(estimate.shape[0])], color_list):
         ax.plot(lag_dt, est_proc, label="Estimate", color=color)
         ax.scatter(lag_dt, est_proc, color=color)
-    if not estimate_error is None:
+    if estimate_error is not None:
         for est_error, color in zip([estimate_error[:, i] for i in range(estimate_error.shape[1])], color_list):
             ax.fill_between(lag_dt, est_error[0], est_error[1], label="Estimate", color=color, alpha=.2)
 
@@ -440,6 +671,33 @@ def plot_its(estimate: np.ndarray, estimate_error=None, lag: int = 1, dt: float 
     ax.set_title(label=title, size=30)
     return None
 
+
+def plot_stat_dist(dist: np.ndarray, dist_err: np.ndarray = None, cmap: str = "viridis"):
+
+    # make the stationary distribution and it's error 1D vectors (assuming abs(upper) and abs(lower) errors have been averaged):
+
+    dist, dist_err = [i.squeeze() if i is not None else None for i in [dist, dist_err]]
+
+    assert len(dist.shape) == 1, "Need a stationary distribution that can be squeezed to one dimension"
+
+    nstates = len(dist)
+    state_labels = np.arange(1, nstates + 1)
+
+    cmap = getattr(plt.cm, cmap)
+    clist = [cmap(i) for i in range(cmap.N)]
+    clist = [clist[int(i)] for i in np.linspace(10, len(clist) - 20, nstates)][::-1]
+
+    plt.figure(figsize=(10, 6))
+    plt.bar(state_labels, dist, yerr=dist_err,
+            ecolor="grey", color=clist, capsize=10, width=.9, linewidth=3, edgecolor="black",
+            align="center", error_kw=dict(capthick=3, lw=3))
+    plt.xticks(state_labels, state_labels)
+    plt.xlabel("State", size=30)
+    plt.ylabel("Staionary Probability", size=30)
+    plt.title("Stationary Distribution", size=29)
+    plt.xticks(size=30)
+    plt.yticks(size=30)
+    plt.xlim(.5, nstates + .5)
 
 def plot_cktest(predict: np.ndarray, estimate: np.ndarray, lag: int, dt: float, unit="ns",
                 predict_color="red", estimate_color="black", predict_errors=None, estimate_errors=None,
@@ -510,7 +768,7 @@ def plot_cktest(predict: np.ndarray, estimate: np.ndarray, lag: int, dt: float, 
 
 def plot_mat_error(mat, emat, title, unit, cbarlabel, textcolor: str = "white", cmap="viridis",
                    ticklabs: list = None, val_text_size: int = 40, err_text_size: int = 40,
-                   clims: list = [None, None], decimals: int = 2, round_int=False):
+                   clims: list = (None, None), decimals: int = 2, round_int=False):
     """mat = square matrix
         emat = matrix of same dim as mat with errors of values in mat
         unit = string specifying the units"""
@@ -1076,12 +1334,13 @@ class KoopmanModel():
                  model_state_dict: str = None,
                  all_optim_state_dict: str = None,
                  uS_optim_state_dict: str = None,
+                 constraint_learning_rate: float = None,
+                 all_learning_rate: float = None,
                  output_dim: int = None,
                  lag: int = None,
                  epsilon: float = None,
                  batch_size: int = None,
                  epochs: int = None,
-                 lrs: "list[uS_learning_rate, all_learning_rate] or dict with same keys as shown in list" = None,
                  indices: np.ndarray = None,
                  pin_memory=False,
                  num_workers=0,
@@ -1110,20 +1369,18 @@ class KoopmanModel():
             self.pin_memory = pin_memory
             self.num_workers = num_workers
             self.epochs = epochs
-            self.out_dir = out_dir
             self.indices = indices
             self.train_val_log = dict(zip("uS,all,S".split(","), [None] * 3))
             self.chi_state_dict = chi_state_dict
             self.model_state_dict = model_state_dict
             self.uS_optim_state_dict = uS_optim_state_dict
             self.all_optim_state_dict = all_optim_state_dict
-            assert isinstance(lrs, (dict, list)), "must provide learning rates (lrs) as either a list or dict"
-            if isinstance(lrs, list):
-                self.lrs = dict(zip("uS,all".split(","), lrs))
-            else:
-                self.lrs = lrs
+            assert all(i is not None for i in [constraint_learning_rate, all_learning_rate]), "must provide constraint_learning_rate and all_learning_rate if not restoring from ckpt"
+            self.lrs = dict(zip("uS,all".split(","), [constraint_learning_rate, all_learning_rate]))
             if out_dir is None:
-                self.out_dir = os.getcwd()
+                self.out_dir=os.getcwd()
+            else:
+                self.out_dir=out_dir
 
         # defaults
         # self.original_lag = None
@@ -1395,14 +1652,14 @@ class KoopmanModel():
                 setattr(self, key, value)
 
         if self.model_state_dict is None:
-            self.model = ConstrainedVAMPnet(chi=chi(),
+            self.model = ConstrainedVAMPnet(chi=chi(self.output_dim),
                                             vamp_u=vamp_u(self.output_dim),
                                             vamp_S=vamp_S(self.output_dim),
                                             chi_state_dict=self.chi_state_dict,
                                             n_devices=self.n_devices).cuda()
 
         else:
-            self.model = ConstrainedVAMPnet(chi=chi(),
+            self.model = ConstrainedVAMPnet(chi=chi(self.output_dim),
                                             vamp_u=vamp_u(self.output_dim),
                                             vamp_S=vamp_S(self.output_dim),
                                             n_devices=self.n_devices)
@@ -1419,7 +1676,7 @@ class KoopmanModel():
 
         self.clean()
 
-        return None
+        pass
 
     def update_train_val_log(self, key: str, increment_log=True):
         if key is None:
@@ -1438,13 +1695,13 @@ class KoopmanModel():
             print(f"Updated log {key} with attempt {n}")
 
         self.logger = self.train_val_log[key][n]
-        return None
+        pass
 
     def clean(self):
         gc.collect()
         with torch.no_grad():
             torch.cuda.empty_cache()
-        return None
+        pass
 
     def inv(self, x, sqrt=False):
         lam, v = np.linalg.eigh(x)
@@ -1475,7 +1732,7 @@ class KoopmanModel():
                       disable_bar=True, return_none=False):
 
         if chi_data is None:
-            train_data, val_data = self.predict_chi(disable_bar=disable_bar, return_lagged=True)
+            train_data, val_data = self.predict_chi(disable_bar=disable_bar, return_lagged=True, return_flat=False)
         else:
             train_data, val_data = self.get_data(data=chi_data, loader=False)
 
@@ -1512,8 +1769,8 @@ class KoopmanModel():
         callback = EarlyStopping(patience=patience, improvement_threshold=improvement_threshold)
 
         # potentially set u or S to its optimal value and get chi train and val data
-        train_data, val_data = [i.fullset() for i in self.optim_weights(u=optimal_u, S=optimal_S,
-                                                                        chi_data=chi_data)]
+        train_data, val_data = [i.fullset() for i in self.optim_weights(u=optimal_u, S=optimal_S, chi_data=chi_data)]
+
         if train_its:
             train_data = val_data
 
@@ -1639,7 +1896,7 @@ class KoopmanModel():
             if checkpoint():
                 self.save_state()
             if callback(self.logger["val_scores"][-1]):
-                print(f"training loop was stopped at epoch {epoch}")
+                print(f"training loop was stopped at iteration {_}")
                 self.save_state()
                 self.clean()
                 break
@@ -1656,18 +1913,17 @@ class KoopmanModel():
             self.reset_lag()
             self.reset_epsilon()
             self.results = {}
-            if not hasattr(self, "has_original_result"):
-                self.has_original_result = True
-                train_result, val_result = self.predict_uS(chi_data=chi_data, S=True)
-                train_result, val_result = train_result[-2], val_result[-2]
-                self.results[self.original_lag] = {"val_result": {}, "train_result": {}}
-                self.results[self.original_lag]["train_result"]["K"] = train_result
-                self.results[self.original_lag]["val_result"]["K"] = val_result
-                ckpt_dir = self.ckpt_dir + "/"
-                for i, j in zip("train,val".split(","), [train_result, val_result]):
-                    np.save(ckpt_dir + i + "_transition_matrix", j)
-                    pi = self.compute_pi(j)
-                    np.save(ckpt_dir + i + "_stationary_distribution", pi)
+            train_result, val_result = self.predict_uS(chi_data=chi_data, S=True)
+            train_result, val_result = train_result[-2], val_result[-2]
+            self.results[self.original_lag] = {"val_result": {}, "train_result": {}}
+            self.results[self.original_lag]["train_result"]["K"] = train_result
+            self.results[self.original_lag]["val_result"]["K"] = val_result
+            ckpt_dir = self.ckpt_dir + "/"
+            for i, j in zip("train,val".split(","), [train_result, val_result]):
+                np.save(ckpt_dir + i + "_transition_matrix", j)
+                pi = self.compute_pi(j)
+                self.results[self.original_lag][f"{i}_result"]["pi"] = pi
+                np.save(ckpt_dir + i + "_stationary_distribution", pi)
 
 
         self.model.train()
@@ -1711,8 +1967,8 @@ class KoopmanModel():
                          optimal_S=optimal_S, disable_bar=disable_bar, patience=patience, new_optim=new_optim,
                          new_lr=new_lr)
 
-    def predict_chi(self, return_lagged=False, return_flat=False,
-                    return_lag=None, disable_bar=False):
+    def predict_chi(self, return_lagged=False, return_flat=True,
+                    lag=None, disable_bar=False):
         dataloader = self.get_data(flat=True)
         self.model.eval()
         with torch.no_grad():
@@ -1726,14 +1982,14 @@ class KoopmanModel():
             outs = np.concatenate(outs)
 
         self.clean()
-        if return_flat and return_lagged:
-            return outs, self.get_data(data=outs, loader=False, lag=return_lag)
+        if return_flat and not return_lagged:
+            return outs
 
-        elif return_lagged:
-            return self.get_data(data=outs, loader=False, lag=return_lag)
+        elif return_lagged and not return_flat:
+            return self.get_data(data=outs, loader=False, lag=lag)
 
         else:
-            return outs
+            return outs, self.get_data(data=outs, loader=False, lag=lag)
 
     def save_chi_data(self, chi_data=None, ckpt_dir=None, reindex: np.ndarray = None):
         if ckpt_dir is None:
@@ -1888,10 +2144,10 @@ class KoopmanModel():
                 else:
                     if return_chi:
                         chi_data, train_data, val_data = self.predict_chi(return_flat=True, return_lagged=True,
-                                                                          return_lag=lag)
+                                                                          lag=lag)
                         outs.append(chi)
                     else:
-                        train_data, val_data = self.predict_chi(return_lagged=True, return_lag=lag)
+                        train_data, val_data = self.predict_chi(return_lagged=True, return_flat=False, lag=lag)
 
                     train_data, val_data = [i.fullset() for i in [train_data, val_data]]
 
@@ -1988,7 +2244,7 @@ class KoopmanModel():
                          save_data=False, save_plot=False, plot=True,
                          tau=None):
 
-        assert hasattr(self, "results"), "Must have results to make CK-test"
+        assert hasattr(self, "results"), "Must have results to make validation tests"
 
         if not hasattr(self, "ckpt_dir"):
             self.save_state()
@@ -2025,7 +2281,10 @@ class KoopmanModel():
 
 
 
+
+
 if __name__ == "__main__":
+
     parser = argparse.ArgumentParser(description="Train Constrained VAMPnet")
 
     parser.add_argument("--data_path", "-data", required=True, type=str,
@@ -2053,11 +2312,11 @@ if __name__ == "__main__":
     parser.add_argument("--stride", "-s", default=1, type=int,
                         help="Stride for input data of neural network")
 
-    parser.add_argument("--constraint_lr", default=0.01,
-                        type=float, help="Learning rate of optimizer")
+    parser.add_argument("--constraint_learning_rate", default=0.01,
+                        type=float, help="Learning rate of optimizer for just the constraint layers")
 
-    parser.add_argument("--network_lr", default=1e-7,
-                        type=float, help="Learning rate of constraints optimizer")
+    parser.add_argument("--all_learning_rate", default=1e-7,
+                        type=float, help="Learning rate optimizer for full, constrained VAMPnet")
 
     parser.add_argument("--output_dim", required=True, type=int,
                         help="The number of output states for the VAMPnet")
@@ -2076,20 +2335,13 @@ if __name__ == "__main__":
 
     parser.add_argument("--num_workers", required=False, type=str, default=0,
                         help="Number of workers to use in pytorch dataloaders")
+
     parser.add_argument("--n_devices", required = False, type = int, default = None,
                         help = "The number of devices to use to train the neural network")
 
     args = parser.parse_args()
-
-    if len(args.net_script.split("/")) == 1 or args.net_script.split("/")[-2] == ".":
-        module_dir = os.getcwd()
-    else:
-        module_dir = "/".join(args.net_script.split("/")[:-1])
-
-    sys.path.insert(0, module_dir)
-    module = importlib.import_module(args.net_script.split("/")[-1].replace(".py", ""))
-    g = globals()
-    g["chi"] = getattr(module, args.net_name)
+    # add the pytorch nn.Module neural network class defined in args.net_script into the name space and call it "chi"
+    source_module_attr(module_file=args.net_script, attr_name=args.net_name, local_attr_name="chi")
 
     koop = KoopmanModel(data_path=args.data_path,
                         chi_state_dict=args.chi_state_dict,
@@ -2098,7 +2350,8 @@ if __name__ == "__main__":
                         epsilon=args.epsilon,
                         batch_size=args.batch_size,
                         epochs=args.n_epochs,
-                        lrs=[args.constraint_lr, args.network_lr],  # one for constraints one for the entire network
+                        constraint_learning_rate=args.constraint_learning_rate,
+                        all_learning_rate=args.all_learning_rate,
                         indices=args.indices,
                         out_dir=args.out_dir,
                         pin_memory=args.pin_memory,
