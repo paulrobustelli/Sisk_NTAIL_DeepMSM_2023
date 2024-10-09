@@ -2051,7 +2051,7 @@ class KoopmanModel():
             # make sure the computed stats have a base name to save with
             assert obs_name is not None, "Must provide a string identifier (obs name) to save ensemble average data"
             # always save expectation value
-            for key, value in out.items():
+            for key, value in outs.items():
                 if isinstance(value, np.ndarray):
                     np.save(ckpt_dir + f"{obs_name}_ensemble_{key}", value)
                 else:
